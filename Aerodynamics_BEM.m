@@ -1,16 +1,3 @@
-% -----------------------------
-% Function: Calculates aerodynamic torque and thrust based on the Blade
-% Element Momentum Theory
-% ------------
-% Input:
-% - x           vector of states [Omega, x_T, x_T_dot]
-% - v_0         scalar of rotor-effective wind speed
-% - Parameter   struct of Parameters
-% ------------
-% Output:
-% - M_a         scalar of aerodynamic torque
-% - F_a         scalar of aerodynamic thrust
-% ----------------------------------
 function [M_a,F_a] = Aerodynamics_BEM(x,v_0,Parameter)
 
     Omega   = x(1);
@@ -37,10 +24,36 @@ function [M_a,F_a] = Aerodynamics_BEM(x,v_0,Parameter)
     dT = zeros(n_nodes, 1);
     dM = zeros(n_nodes, 1);
 
+    num_foils = length(Parameter.BEM.AoA);
+    idx_array = ones(n_nodes, 1);
+    
+    fields = fieldnames(Parameter.BEM);
+    for k = 1:length(fields)
+        val = Parameter.BEM.(fields{k});
+        if isnumeric(val) && length(val) == n_nodes
+            if max(val) <= num_foils && max(val) > 1 && all(floor(val) == val)
+                idx_array = val;
+                break;
+            end
+        end
+    end
+
     for i = 1:n_nodes
         r = rNodes(i);
         c = chord(i);
         beta = twist(i); 
+        
+        foil_idx = idx_array(i);
+        
+        if iscell(Parameter.BEM.AoA)
+            AoA_curr = double(Parameter.BEM.AoA{foil_idx});
+            Cl_curr  = double(Parameter.BEM.Cl{foil_idx});
+            Cd_curr  = double(Parameter.BEM.Cd{foil_idx});
+        else
+            AoA_curr = double(Parameter.BEM.AoA(:, foil_idx));
+            Cl_curr  = double(Parameter.BEM.Cl(:, foil_idx));
+            Cd_curr  = double(Parameter.BEM.Cd(:, foil_idx));
+        end
         
         sigma_r = (z * c) / (2 * pi * r);
         lambda_r = (Omega * r) / max(v_rel, 0.1); 
@@ -60,8 +73,8 @@ function [M_a,F_a] = Aerodynamics_BEM(x,v_0,Parameter)
             phi = atan2((1 - a), (lambda_r * (1 + a_prime)));
             alpha_deg = rad2deg(phi) - beta;
             
-            Cl = interp1(Parameter.BEM.AoA, Parameter.BEM.Cl, alpha_deg, 'linear', 'extrap');
-            Cd = interp1(Parameter.BEM.AoA, Parameter.BEM.Cd, alpha_deg, 'linear', 'extrap');
+            Cl = interp1(AoA_curr, Cl_curr, alpha_deg, 'linear', 'extrap');
+            Cd = interp1(AoA_curr, Cd_curr, alpha_deg, 'linear', 'extrap');
             
             f_tip = (z / 2) * (R - r) / (r * max(abs(sin(phi)), 1e-5));
             if f_tip > 20
