@@ -1,0 +1,108 @@
+% -----------------------------
+% Function: Calculates aerodynamic torque and thrust
+% using Blade Element Momentum (BEM) Theory
+% ----------------------------------
+function [M_a,F_a] = Aerodynamics_BEM(x,v_0,Parameter)
+
+%% STATES
+Omega      = x(1);     % Rotor speed [rad/s]
+x_T_dot    = x(3);     % Tower top velocity [m/s]
+%% RELATIVE WIND SPEED
+v_rel = v_0 - x_T_dot;
+% Avoid division by zero
+v_rel = max(v_rel,0.1);
+%% CONSTANTS
+rho = 1.225;           % Air density [kg/m^3]
+B   = 3;               % Number of blades
+%% BLADE DATA
+r       = Parameter.BEM.RNodes;
+dr      = Parameter.BEM.DRNodes;
+twist   = Parameter.BEM.AeroTwst;
+chord   = Parameter.BEM.Chord;
+NFoil   = Parameter.BEM.NFoil;
+R = r(end);
+%% INITIALIZE OUTPUTS
+M_a = 0;
+F_a = 0;
+%% LOOP OVER BLADE ELEMENTS
+for i = 1:length(r)
+
+    %% INITIAL GUESSES
+    a  = 0.3;
+    ap = 0.01;
+    %% FIXED POINT ITERATION
+    for iter = 1:100
+
+        %% LOCAL TIP SPEED RATIO
+        lambda_r = Omega * r(i) / v_rel;
+        % Avoid division problems
+        lambda_r = max(lambda_r,1e-4);
+        %% FLOW ANGLE
+        phi = atan( (1-a) / (lambda_r*(1+ap)) );
+        % Avoid singularities
+        phi = max(phi,deg2rad(1));
+        %% ANGLE OF ATTACK [deg]
+        alpha = rad2deg(phi) - twist(i);
+        %% AIRFOIL DATA
+        iFoil = NFoil(i);
+        AoA      = Parameter.BEM.AoA{iFoil};
+        Cl_table = Parameter.BEM.Cl{iFoil};
+        Cd_table = Parameter.BEM.Cd{iFoil};
+        %% REMOVE INVALID VALUES
+        valid = ~(isnan(AoA) | isnan(Cl_table) | isnan(Cd_table));
+        AoA      = AoA(valid);
+        Cl_table = Cl_table(valid);
+        Cd_table = Cd_table(valid);
+        %% INTERPOLATE Cl AND Cd
+        Cl = interp1(AoA,Cl_table,alpha,'linear','extrap');
+        Cd = interp1(AoA,Cd_table,alpha,'linear','extrap');
+        %% LOCAL SOLIDITY
+        sigma = B * chord(i) / (2*pi*r(i));
+        %% PRANDTL TIP LOSS FACTOR
+        sin_phi = max(abs(sin(phi)),1e-4);
+        f_tip = (B/2) * ((R-r(i)) / (r(i)*sin(phi)));
+        Q = (2/pi) * acos(exp(-f_tip));
+        % Numerical stability
+        Q = max(Q,0.001);
+        %% UPDATE AXIAL INDUCTION FACTOR a
+        K = sigma * ...
+            (Cl*cos(phi) + Cd*sin(phi)) ...
+            / (4 * Q * sin(phi)^2);
+        a_new = K / (1 + K);
+        %% UPDATE TANGENTIAL INDUCTION FACTOR a'
+        Kp = sigma * ...
+             (Cl*sin(phi) - Cd*cos(phi)) ...
+             / (4 * Q * lambda_r * sin(phi)^2);
+        ap_new = Kp / (1 - Kp);
+        %% RELAXATION
+        a  = 0.75*a  + 0.25*a_new;
+        ap = 0.75*ap + 0.25*ap_new;
+        %% LIMIT VALUES
+        a  = max(0,min(a,0.5));
+        ap = max(0,min(ap,1));
+        %% CONVERGENCE CHECK
+        if abs(a-a_new) < 1e-5 && abs(ap-ap_new) < 1e-5
+            break
+        end
+
+    end
+    %% VELOCITIES
+    V_axial = v_rel * (1-a);
+    V_tan = Omega * r(i) * (1+ap);
+    %% RELATIVE WIND SPEED
+    W = sqrt(V_axial^2 + V_tan^2);
+    %% LIFT AND DRAG
+    L = 0.5 * rho * W^2 * chord(i) * Cl;
+    D = 0.5 * rho * W^2 * chord(i) * Cd;
+    %% NORMAL AND TANGENTIAL FORCES
+    Fn = L*cos(phi) + D*sin(phi);
+    Ft = L*sin(phi) - D*cos(phi);
+    %% SECTIONAL THRUST AND TORQUE
+    dF = Fn * dr(i);
+    dM = Ft * r(i) * dr(i);
+    %% SUM OVER ALL BLADES
+    F_a = F_a + B*dF;
+    M_a = M_a + B*dM;
+end
+
+end
