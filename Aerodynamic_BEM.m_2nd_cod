@@ -1,0 +1,121 @@
+% -----------------------------
+% Function: Calculates aerodynamic torque and thrust based on the "Blade
+% Element Momentum Theory following [3]
+% ------------
+% Input:
+% - x           vector of states 
+% - v_0         scalar of rotor-effective wind speed
+% - Parameter   struct of Parameters
+% ------------
+% Output:
+% - M_a         scalar of aerodynamic torque
+% - F_a         scalar of aerodynamic thrust
+% ----------------------------------
+function [M_a,F_a] = Aerodynamics_BEM(x,v_0,Parameter)
+
+% internal parameters
+R       = Parameter.Turbine.R;
+rho     = Parameter.General.rho;
+z       = 3;                    % number of blades
+
+% states
+Omega   = x(1);
+x_T_dot = x(3);
+
+% relative wind speed
+v_rel   = v_0 - x_T_dot;
+
+% BEM geometry
+r       = Parameter.BEM.RNodes;
+beta    = Parameter.BEM.AeroTwst;     % [deg]
+dr      = Parameter.BEM.DRNodes;
+c       = Parameter.BEM.Chord;
+NFoil   = Parameter.BEM.NFoil;
+
+% initialization
+F_a     = 0;
+M_a     = 0;
+
+% numerical settings
+maxIter = 100;
+tol     = 1e-5;
+relax   = 0.3;
+
+for i = 1:length(r)
+
+    % local blade data
+    ri      = r(i);
+    ci      = c(i);
+    dri     = dr(i);
+    betai   = beta(i);
+    foilID  = NFoil(i);
+
+    % local solidity
+    sigma_r = z * ci / (2*pi*ri);
+
+    % initial guesses
+    a       = 1/3;
+    a_prime = 0;
+
+    for iter = 1:maxIter
+
+        % avoid numerical problems
+        lambda_r = Omega * ri / v_rel;
+
+        % relative flow angle
+        phi = atan2((1-a), lambda_r*(1+a_prime));
+
+        % angle of attack [deg]
+        alpha = rad2deg(phi) - betai;
+
+        % interpolate airfoil coefficients
+        Cl = interp1(Parameter.BEM.AoA{foilID}, Parameter.BEM.Cl{foilID}, alpha, 'linear', 'extrap');
+        Cd = interp1(Parameter.BEM.AoA{foilID}, Parameter.BEM.Cd{foilID}, alpha, 'linear', 'extrap');
+
+        % Prandtl tip-loss factor
+        sinPhi = max(abs(sin(phi)), 1e-6);
+        f_tip = (z/2) * (R - ri) / (ri * sinPhi);
+        Q = (2/pi) * acos(exp(-f_tip));
+        Q = max(Q, 1e-4);
+
+        % update induction factors from BEM equations
+        A = sigma_r * (Cl*cos(phi) + Cd*sin(phi)) / (4*Q*sinPhi^2);
+        B = sigma_r * (Cl*sin(phi) - Cd*cos(phi)) / (4*Q*lambda_r*sinPhi^2);
+
+        a_new       = A / (1 + A);
+        a_prime_new = B * (1 - a_new);
+
+        % relaxation for stability
+        a_updated       = (1-relax)*a + relax*a_new;
+        a_prime_updated = (1-relax)*a_prime + relax*a_prime_new;
+
+        % convergence check
+        if abs(a_updated-a) < tol && abs(a_prime_updated-a_prime) < tol
+            a       = a_updated;
+            a_prime = a_prime_updated;
+            break
+        end
+
+        a       = a_updated;
+        a_prime = a_prime_updated;
+    end
+
+    % final relative flow angle
+    phi = atan2((1-a), lambda_r*(1+a_prime));
+    alpha = rad2deg(phi) - betai;
+
+    Cl = interp1(Parameter.BEM.AoA{foilID}, Parameter.BEM.Cl{foilID}, alpha, 'linear', 'extrap');
+    Cd = interp1(Parameter.BEM.AoA{foilID}, Parameter.BEM.Cd{foilID}, alpha, 'linear', 'extrap');
+
+    w = v_rel*(1-a) / max(abs(sin(phi)),1e-6);
+
+    % sectional thrust and torque
+    dT = z * 0.5*rho*w^2*ci*(Cl*cos(phi) + Cd*sin(phi))*dri;
+    dU = z * 0.5*rho*w^2*ci*(Cl*sin(phi) - Cd*cos(phi))*dri;
+    dM = dU * ri;
+
+    % sum over blade sections
+    F_a = F_a + dT;
+    M_a = M_a + dM;
+
+end
